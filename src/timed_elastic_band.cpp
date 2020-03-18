@@ -392,7 +392,7 @@ bool TimedElasticBand::initTrajectoryToGoal(const std::vector<geometry_msgs::Pos
     for (int i=1; i<(int)plan.size()-1; ++i)
     {
         double yaw;
-        if (estimate_orient)
+        if (estimate_orient && 0)
         {
             // get yaw from the orientation of the distance vector between pose_{i+1} and pose_{i}
             double dx = plan[i+1].pose.position.x - plan[i].pose.position.x;
