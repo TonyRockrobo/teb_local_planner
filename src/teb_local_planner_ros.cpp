@@ -385,7 +385,7 @@ uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseSt
     time_last_infeasible_plan_ = ros::Time::now();
     last_cmd_ = cmd_vel.twist;
     message = "teb_local_planner trajectory is not feasible";
-    return mbf_msgs::ExePathResult::NO_VALID_CMD;
+    return mbf_msgs::ExePathResult::LOCAL_TRAJ_NOT_FEASIBLE;
   }
 
   // Get the velocity command for this sampling interval
