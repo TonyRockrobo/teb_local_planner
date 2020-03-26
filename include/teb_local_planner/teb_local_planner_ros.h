@@ -223,7 +223,11 @@ public:
   //@}
   
 protected:
-
+  enum TransformResult {
+    TRANS_FAILURE = -1,
+    TRANS_SUCEESS = 0,
+    TRANS_NEED_REPLAN_GLOBAL_PATH = 1,
+  };
   /**
     * @brief Update internal obstacle vector based on occupied costmap cells
     * @remarks All occupied cells will be added as point obstacles.
@@ -316,10 +320,10 @@ protected:
     * @param[out] tf_plan_to_global Transformation between the global plan and the global planning frame
     * @return \c true if the global plan is transformed, \c false otherwise
     */
-  bool transformGlobalPlan(const tf2_ros::Buffer& tf, const std::vector<geometry_msgs::PoseStamped>& global_plan,
-                           const geometry_msgs::PoseStamped& global_pose,  const costmap_2d::Costmap2D& costmap,
-                           const std::string& global_frame, double max_plan_length, std::vector<geometry_msgs::PoseStamped>& transformed_plan,
-                           int* current_goal_idx = NULL, geometry_msgs::TransformStamped* tf_plan_to_global = NULL) const;
+  TransformResult transformGlobalPlan(const tf2_ros::Buffer& tf, const std::vector<geometry_msgs::PoseStamped>& global_plan,
+                                      const geometry_msgs::PoseStamped& global_pose,  const costmap_2d::Costmap2D& costmap,
+                                      const std::string& global_frame, double max_plan_length, std::vector<geometry_msgs::PoseStamped>& transformed_plan,
+                                      int* current_goal_idx = NULL, geometry_msgs::TransformStamped* tf_plan_to_global = NULL);
     
   /**
     * @brief Estimate the orientation of a pose from the global_plan that is treated as a local goal for the local planner.

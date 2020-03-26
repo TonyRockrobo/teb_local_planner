@@ -222,7 +222,7 @@ bool TebLocalPlannerROS::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
   geometry_msgs::TwistStamped dummy_velocity, cmd_vel_stamped;
   uint32_t outcome = computeVelocityCommands(dummy_pose, dummy_velocity, cmd_vel_stamped, dummy_message);
   cmd_vel = cmd_vel_stamped.twist;
-  return outcome == mbf_msgs::ExePathResult::SUCCESS;
+  return outcome < mbf_msgs::ExePathResult::FAILURE;
 }
 
 uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseStamped& pose,
@@ -264,13 +264,19 @@ uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseSt
   std::vector<geometry_msgs::PoseStamped> transformed_plan;
   int goal_idx;
   geometry_msgs::TransformStamped tf_plan_to_global;
-  if (!transformGlobalPlan(*tf_, global_plan_, robot_pose, *costmap_, global_frame_, cfg_.trajectory.max_global_plan_lookahead_dist, 
-                           transformed_plan, &goal_idx, &tf_plan_to_global))
+  TransformResult transform_result = transformGlobalPlan(*tf_, global_plan_, robot_pose, *costmap_, global_frame_, cfg_.trajectory.max_global_plan_lookahead_dist,
+                                                         transformed_plan, &goal_idx, &tf_plan_to_global);
+  if (TRANS_FAILURE == transform_result)
   {
     ROS_WARN("Could not transform the global plan to the frame of the controller");
     message = "Could not transform the global plan to the frame of the controller";
     return mbf_msgs::ExePathResult::INTERNAL_ERROR;
   }
+  uint32_t exe_path_result = mbf_msgs::ExePathResult::SUCCESS;
+  if(transform_result == TransformResult::TRANS_NEED_REPLAN_GLOBAL_PATH) {
+      exe_path_result = mbf_msgs::ExePathResult::NEED_REPLAN_GLOBAL_PATH;
+  }
+
 
   // update via-points container
   if (!custom_via_points_active_)
@@ -287,7 +293,7 @@ uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseSt
     && (!cfg_.goal_tolerance.complete_global_plan || via_points_.size() == 0))
   {
     goal_reached_ = true;
-    return mbf_msgs::ExePathResult::SUCCESS;
+    return exe_path_result;
   }
   
   
@@ -379,7 +385,7 @@ uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseSt
     time_last_infeasible_plan_ = ros::Time::now();
     last_cmd_ = cmd_vel.twist;
     message = "teb_local_planner trajectory is not feasible";
-    return mbf_msgs::ExePathResult::NO_VALID_CMD;
+    return mbf_msgs::ExePathResult::LOCAL_TRAJ_NOT_FEASIBLE;
   }
 
   // Get the velocity command for this sampling interval
@@ -429,7 +435,7 @@ uint32_t TebLocalPlannerROS::computeVelocityCommands(const geometry_msgs::PoseSt
   visualization_->publishObstacles(obstacles_);
   visualization_->publishViaPoints(via_points_);
   visualization_->publishGlobalPlan(global_plan_);
-  return mbf_msgs::ExePathResult::SUCCESS;
+  return exe_path_result;
 }
 
 
@@ -669,9 +675,9 @@ bool TebLocalPlannerROS::pruneGlobalPlan(const tf2_ros::Buffer& tf, const geomet
 }
       
 
-bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const std::vector<geometry_msgs::PoseStamped>& global_plan,
+TebLocalPlannerROS::TransformResult TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const std::vector<geometry_msgs::PoseStamped>& global_plan,
                   const geometry_msgs::PoseStamped& global_pose, const costmap_2d::Costmap2D& costmap, const std::string& global_frame, double max_plan_length,
-                  std::vector<geometry_msgs::PoseStamped>& transformed_plan, int* current_goal_idx, geometry_msgs::TransformStamped* tf_plan_to_global) const
+                  std::vector<geometry_msgs::PoseStamped>& transformed_plan, int* current_goal_idx, geometry_msgs::TransformStamped* tf_plan_to_global) 
 {
   // this method is a slightly modified version of base_local_planner/goal_functions.h
 
@@ -679,13 +685,14 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
 
   transformed_plan.clear();
 
+  bool is_find_obstacle = false;
   try 
   {
     if (global_plan.empty())
     {
       ROS_ERROR("Received plan with zero length");
       *current_goal_idx = 0;
-      return false;
+      return TRANS_FAILURE;
     }
 
     // get plan_to_global_transform from plan frame to global_frame
@@ -703,7 +710,7 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
                            // located on the border of the local costmap
     
 
-    int i = 0;
+    int lookahead_end_index = 0;
     double sq_dist_threshold = dist_threshold * dist_threshold;
     double sq_dist = 1e10;
     
@@ -719,31 +726,42 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
       if (new_sq_dist < sq_dist) // find closest distance
       {
         sq_dist = new_sq_dist;
-        i = j;
+        lookahead_end_index = j;
       }
     }
     
     geometry_msgs::PoseStamped newer_pose;
     
     double plan_length = 0; // check cumulative Euclidean distance along the plan
+    unsigned int x0 = 0;
+    unsigned int y0 = 0;
     
     //now we'll transform until points are outside of our distance threshold
-    while(i < (int)global_plan.size() && sq_dist <= sq_dist_threshold && (max_plan_length<=0 || plan_length <= max_plan_length))
+    while(lookahead_end_index < (int)global_plan.size() && sq_dist <= sq_dist_threshold
+          && (max_plan_length<=0 || plan_length <= max_plan_length))
     {
-      const geometry_msgs::PoseStamped& pose = global_plan[i];
+      const geometry_msgs::PoseStamped& pose = global_plan[lookahead_end_index];
       tf2::doTransform(pose, newer_pose, plan_to_global_transform);
-
       transformed_plan.push_back(newer_pose);
 
-      double x_diff = robot_pose.pose.position.x - global_plan[i].pose.position.x;
-      double y_diff = robot_pose.pose.position.y - global_plan[i].pose.position.y;
+      double x_diff = robot_pose.pose.position.x - global_plan[lookahead_end_index].pose.position.x;
+      double y_diff = robot_pose.pose.position.y - global_plan[lookahead_end_index].pose.position.y;
       sq_dist = x_diff * x_diff + y_diff * y_diff;
       
       // caclulate distance to previous pose
-      if (i>0 && max_plan_length>0)
-        plan_length += distance_points2d(global_plan[i-1].pose.position, global_plan[i].pose.position);
+      if (lookahead_end_index>0 && max_plan_length>0)
+        plan_length += distance_points2d(global_plan[lookahead_end_index-1].pose.position, global_plan[lookahead_end_index].pose.position);
 
-      ++i;
+      ++lookahead_end_index;
+
+      if(is_find_obstacle)
+        continue;
+
+      if(costmap_->worldToMap(newer_pose.pose.position.x, newer_pose.pose.position.y, x0, y0)
+              && costmap_model_->pointCost(x0, y0) == -1.0)
+      {
+        is_find_obstacle = true;
+      }
     }
         
     // if we are really close to the goal (<sq_dist_threshold) and the goal is not yet reached (e.g. orientation error >>0)
@@ -760,7 +778,7 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
     else
     {
       // Return the index of the current goal point (inside the distance threshold)
-      if (current_goal_idx) *current_goal_idx = i-1; // subtract 1, since i was increased once before leaving the loop
+      if (current_goal_idx) *current_goal_idx = lookahead_end_index-1; // subtract 1, since i was increased once before leaving the loop
     }
     
     // Return the transformation from the global plan to the global planning frame if desired
@@ -769,12 +787,12 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
   catch(tf::LookupException& ex)
   {
     ROS_ERROR("No Transform available Error: %s\n", ex.what());
-    return false;
+    return TRANS_FAILURE;
   }
   catch(tf::ConnectivityException& ex) 
   {
     ROS_ERROR("Connectivity Error: %s\n", ex.what());
-    return false;
+    return TRANS_FAILURE;
   }
   catch(tf::ExtrapolationException& ex) 
   {
@@ -782,10 +800,10 @@ bool TebLocalPlannerROS::transformGlobalPlan(const tf2_ros::Buffer& tf, const st
     if (global_plan.size() > 0)
       ROS_ERROR("Global Frame: %s Plan Frame size %d: %s\n", global_frame.c_str(), (unsigned int)global_plan.size(), global_plan[0].header.frame_id.c_str());
 
-    return false;
+    return TRANS_FAILURE;
   }
 
-  return true;
+  return (is_find_obstacle ? TRANS_NEED_REPLAN_GLOBAL_PATH : TRANS_SUCEESS);
 }
 
     
